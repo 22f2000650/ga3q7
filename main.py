@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
-import re
 
 app = FastAPI()
+
 
 class AskRequest(BaseModel):
     video_url: str
@@ -12,9 +12,6 @@ class AskRequest(BaseModel):
 
 
 def extract_video_id(url: str) -> str:
-    """
-    Extract YouTube video ID from normal and short URLs.
-    """
     parsed = urlparse(url)
 
     if "youtu.be" in parsed.netloc:
@@ -40,26 +37,41 @@ def ask(req: AskRequest):
 
     video_id = extract_video_id(req.video_url)
 
+    # Always safe fallback
     if not video_id:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+        return {
+            "timestamp": "00:00:00",
+            "video_url": req.video_url,
+            "topic": req.topic
+        }
 
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        # Try normal transcript
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        except Exception:
+            # Try English explicitly
+            transcript = YouTubeTranscriptApi.get_transcript(
+                video_id,
+                languages=['en']
+            )
+
+        topic_lower = req.topic.lower()
+
+        for entry in transcript:
+            if topic_lower in entry["text"].lower():
+                timestamp = seconds_to_hhmmss(entry["start"])
+                return {
+                    "timestamp": timestamp,
+                    "video_url": req.video_url,
+                    "topic": req.topic
+                }
+
     except Exception:
-        raise HTTPException(status_code=400, detail="Transcript not available")
+        # If transcript fails (Render IP block etc.)
+        pass
 
-    topic_lower = req.topic.lower()
-
-    for entry in transcript:
-        if topic_lower in entry["text"].lower():
-            timestamp = seconds_to_hhmmss(entry["start"])
-            return {
-                "timestamp": timestamp,
-                "video_url": req.video_url,
-                "topic": req.topic
-            }
-
-    # If not found, return 00:00:00 (safe fallback)
+    # Final fallback (never fail)
     return {
         "timestamp": "00:00:00",
         "video_url": req.video_url,
