@@ -1,66 +1,67 @@
-import os
-import re
-import time
-import yt_dlp
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import google.generativeai as genai
+from youtube_transcript_api import YouTubeTranscriptApi
+from urllib.parse import urlparse, parse_qs
+import re
 
 app = FastAPI()
-
-# Set your Gemini API key as environment variable
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 class AskRequest(BaseModel):
     video_url: str
     topic: str
 
-def download_audio(url, filename="audio.mp3"):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': filename,
-        'quiet': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-        }],
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    return filename
 
-def extract_timestamp(text):
-    match = re.search(r'\b\d{2}:\d{2}:\d{2}\b', text)
-    return match.group(0) if match else "00:00:00"
+def extract_video_id(url: str) -> str:
+    """
+    Extract YouTube video ID from normal and short URLs.
+    """
+    parsed = urlparse(url)
+
+    if "youtu.be" in parsed.netloc:
+        return parsed.path.strip("/")
+
+    if "youtube.com" in parsed.netloc:
+        query = parse_qs(parsed.query)
+        return query.get("v", [None])[0]
+
+    return None
+
+
+def seconds_to_hhmmss(seconds: float) -> str:
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02}:{m:02}:{s:02}"
+
 
 @app.post("/ask")
 def ask(req: AskRequest):
-    audio_file = download_audio(req.video_url)
 
-    # Upload file to Gemini
-    file = genai.upload_file(audio_file)
+    video_id = extract_video_id(req.video_url)
 
-    # Wait until file is ACTIVE
-    while file.state.name != "ACTIVE":
-        time.sleep(2)
-        file = genai.get_file(file.name)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
 
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Transcript not available")
 
-    response = model.generate_content(
-        [
-            file,
-            f"Find the first time the topic '{req.topic}' is spoken in this audio. "
-            "Return ONLY the timestamp in HH:MM:SS format."
-        ]
-    )
+    topic_lower = req.topic.lower()
 
-    timestamp = extract_timestamp(response.text)
+    for entry in transcript:
+        if topic_lower in entry["text"].lower():
+            timestamp = seconds_to_hhmmss(entry["start"])
+            return {
+                "timestamp": timestamp,
+                "video_url": req.video_url,
+                "topic": req.topic
+            }
 
-    os.remove(audio_file)
-
+    # If not found, return 00:00:00 (safe fallback)
     return {
-        "timestamp": timestamp,
+        "timestamp": "00:00:00",
         "video_url": req.video_url,
         "topic": req.topic
     }
