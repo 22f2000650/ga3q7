@@ -32,12 +32,16 @@ def seconds_to_hhmmss(seconds: float) -> str:
     return f"{h:02}:{m:02}:{s:02}"
 
 
+def normalize(text: str) -> str:
+    return "".join(c.lower() for c in text if c.isalnum() or c.isspace())
+
+
 @app.post("/ask")
 def ask(req: AskRequest):
 
     video_id = extract_video_id(req.video_url)
 
-    # Always safe fallback
+    # Always return safe format
     if not video_id:
         return {
             "timestamp": "00:00:00",
@@ -46,29 +50,44 @@ def ask(req: AskRequest):
         }
 
     try:
-        # Try normal transcript
+        # Try fetching transcript
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id)
         except Exception:
-            # Try English explicitly
             transcript = YouTubeTranscriptApi.get_transcript(
                 video_id,
-                languages=['en']
+                languages=["en"]
             )
 
-        topic_lower = req.topic.lower()
+        topic_clean = normalize(req.topic)
+        topic_words = topic_clean.split()
+
+        # 1️⃣ Strong word-based matching
+        for entry in transcript:
+            text_clean = normalize(entry["text"])
+
+            if all(word in text_clean for word in topic_words):
+                return {
+                    "timestamp": seconds_to_hhmmss(entry["start"]),
+                    "video_url": req.video_url,
+                    "topic": req.topic
+                }
+
+        # 2️⃣ Fallback: Join transcript blocks for cross-line phrase match
+        combined_text = ""
+        combined_start = 0
 
         for entry in transcript:
-            if topic_lower in entry["text"].lower():
-                timestamp = seconds_to_hhmmss(entry["start"])
+            combined_text += " " + normalize(entry["text"])
+
+            if topic_clean in combined_text:
                 return {
-                    "timestamp": timestamp,
+                    "timestamp": seconds_to_hhmmss(entry["start"]),
                     "video_url": req.video_url,
                     "topic": req.topic
                 }
 
     except Exception:
-        # If transcript fails (Render IP block etc.)
         pass
 
     # Final fallback (never fail)
